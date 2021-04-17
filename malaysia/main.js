@@ -1,71 +1,126 @@
-const Apify = require('apify');
+// main.js
+const Apify = require("apify");
+const { log } = Apify.utils;
 
-const sourceUrl = 'http://covid-19.moh.gov.my/';
-const LATEST = 'LATEST';
+const LATEST = "LATEST";
+const now = new Date();
+const sourceUrl = "http://covid-19.moh.gov.my/";
 
 Apify.main(async () => {
+  log.info("Starting actor.");
 
-    const kvStore = await Apify.openKeyValueStore('COVID-19-MY');
-    const dataset = await Apify.openDataset('COVID-19-MY-HISTORY');
+  const kvStore = await Apify.openKeyValueStore("COVID-19-MY");
+  const dataset = await Apify.openDataset("COVID-19-MY-HISTORY");
 
-    console.log('Launching Puppeteer...');
-    const browser = await Apify.launchPuppeteer({
-        args: ['--disable-web-security', '--disable-features=site-per-process'],
-    });
+  const requestQueue = await Apify.openRequestQueue();
+  await requestQueue.addRequest({
+    url: sourceUrl,
+    userData: {
+      label: "GET_IFRAME",
+    },
+  });
 
-    const page = await browser.newPage();
-    await Apify.utils.puppeteer.injectJQuery(page);
+  log.debug("Setting up crawler.");
+  const cheerioCrawler = new Apify.CheerioCrawler({
+    requestQueue,
+    maxRequestRetries: 5,
+    requestTimeoutSecs: 60,
+    useApifyProxy: true,
+    // additionalMimeTypes: [''],
+    handlePageFunction: async ({ request, $, body }) => {
+      const { label } = request.userData;
+      log.info("Page opened.", { label, url: request.url });
 
-    console.log('Going to the website...');
-    await page.goto(sourceUrl, { waitUntil: 'networkidle0', timeout: 60000 });
+      switch (label) {
+        case "GET_IFRAME": {
+          const iframUrl = $('script[title*="Dashboard Ringkas"]').attr('id')
+            .match(/[^_]+/g).pop();
 
-    console.log('Getting data...');
+          await requestQueue.addRequest({
+            url: `https://e.infogram.com/${iframUrl}`,
+            userData: {
+              label: "EXTRACT_DATA",
+            },
+          });
+          break;
+        }
+        case "EXTRACT_DATA": {
+          log.info("Processing and saving data...");
 
-    const result = await page.evaluate(() => {
-        const now = new Date();
+          const values = body.match(/(?<="text":")(\d|,)+(?=")/g);
+          const srcDate = new Date(
+            body.match(/(?<=updatedAt":")[^"]+(?=")/g)[0]
+          );
 
-        const iframeDocument = document.querySelector('#g-header .g-content > iframe').contentDocument;
-        const testedPositive = iframeDocument.querySelector('.InfographicEditor-Contents-Item:nth-child(19) span[data-text=true]').innerText;
-        const recovered = iframeDocument.querySelector('.InfographicEditor-Contents-Item:nth-child(17) span[data-text=true]').innerText;
-        const activeCases = iframeDocument.querySelector('.InfographicEditor-Contents-Item:nth-child(21) span[data-text=true]').innerText;
-        const inICU = iframeDocument.querySelector('.InfographicEditor-Contents-Item:nth-child(37) .__ig-alignCenter:nth-child(2) span[data-text=true]').innerText;
-        const respiratoryAid = iframeDocument.querySelector('.InfographicEditor-Contents-Item:nth-child(38) .__ig-alignCenter:nth-child(2) span[data-text=true]').innerText;
-        const deceased = iframeDocument.querySelector('.InfographicEditor-Contents-Item:nth-child(18) span[data-text=true]').innerText;
+          console.log(values);
 
-        const data = {
-            testedPositive: Number(testedPositive),
-            recovered: Number(recovered),
-            activeCases: Number(activeCases),
-            inICU: Number(inICU),
-            respiratoryAid: Number(respiratoryAid),
-            deceased: Number(deceased),
-            sourceUrl: 'http://covid-19.moh.gov.my/',
-            lastUpdatedAtApify: new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes())).toISOString(),
-            readMe: 'https://apify.com/zuzka/covid-my',
-        };
-        return data;
+          const data = {
+            testedPositive: toNumber(values[0]),
+            recovered: toNumber(values[3]),
+            activeCases: toNumber(values[1]),
+            inICU: toNumber(values[5]),
+            respiratoryAid: toNumber(values[6]),
+            deceased: toNumber(values[2]),
+            country: "Malaysia",
+            historyData:
+              "https://api.apify.com/v2/datasets/7Fdb90FMDLZir2ROo/items?format=json&clean=1",
+            sourceUrl,
+            lastUpdatedAtApify: new Date(
+              Date.UTC(
+                now.getFullYear(),
+                now.getMonth(),
+                now.getDate(),
+                now.getHours(),
+                now.getMinutes()
+              )
+            ).toISOString(),
+            lastUpdatedAtSource: new Date(
+              Date.UTC(
+                srcDate.getFullYear(),
+                srcDate.getMonth(),
+                srcDate.getDate(),
+                srcDate.getHours(),
+                srcDate.getMinutes()
+              )
+            ).toISOString(),
+            readMe: "https://apify.com/zuzka/covid-my",
+          };
 
-    });
+          // Push the data
+          let latest = await kvStore.getValue(LATEST);
+          if (!latest) {
+            await kvStore.setValue("LATEST", data);
+            latest = Object.assign({}, data);
+          }
+          delete latest.lastUpdatedAtApify;
+          const actual = Object.assign({}, data);
+          delete actual.lastUpdatedAtApify;
 
-    console.log(result)
+          const { itemCount } = await dataset.getInfo();
+          if (
+            JSON.stringify(latest) !== JSON.stringify(actual) ||
+            itemCount === 0
+          ) {
+            await dataset.pushData(data);
+          }
 
-    let latest = await kvStore.getValue(LATEST);
-    if (!latest) {
-        await kvStore.setValue('LATEST', result);
-        latest = result;
-    }
-    delete latest.lastUpdatedAtApify;
-    const actual = Object.assign({}, result);
-    delete actual.lastUpdatedAtApify;
+          await kvStore.setValue("LATEST", data);
+          await Apify.pushData(data);
 
-    if (JSON.stringify(latest) !== JSON.stringify(actual)) {
-        await dataset.pushData(result);
-    }
-
-    await kvStore.setValue('LATEST', result);
-    await Apify.pushData(result);
-
-    console.log('Closing Puppeteer...');
-    await browser.close();
-    console.log('Done.');
+          log.info("Data saved.");
+          break;
+        }
+      }
+    },
+    handleFailedRequestFunction: async ({ request }) => {
+      console.log(`Request ${request.url} failed many times.`);
+      console.dir(request);
+    },
+  });
+  // Run the crawler and wait for it to finish.
+  log.info("Starting the crawl.");
+  await cheerioCrawler.run();
+  log.info("Actor finished.");
 });
+
+const toNumber = (txt) => parseInt(txt.replace(/\D/g, "", 10));

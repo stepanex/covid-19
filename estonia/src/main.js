@@ -1,7 +1,7 @@
 const Apify = require('apify');
-const SOURCE_URL = 'https://www.terviseamet.ee/en/covid19';
+const SOURCE_URL = 'https://koroonakaart.ee/';
 const LATEST = 'LATEST';
-const { log } = Apify.utils;
+const { log, requestAsBrowser } = Apify.utils;
 
 const LABELS = {
     GOV: 'GOV',
@@ -9,13 +9,14 @@ const LABELS = {
 };
 
 Apify.main(async () => {
-    const { notificationEmail } = await Apify.getInput();
+    const { notificationEmail, failedLimit = 5 } = await Apify.getInput();
     const requestQueue = await Apify.openRequestQueue();
+    let failedBefore = (await Apify.getValue('COVID-19-ESTONIA-FAILD')) || 0;
     const kvStore = await Apify.openKeyValueStore('COVID-19-ESTONIA');
     const dataset = await Apify.openDataset("COVID-19-ESTONIA-HISTORY");
-    await requestQueue.addRequest({ url: SOURCE_URL, userData: { label: LABELS.GOV} });
+    await requestQueue.addRequest({ url: SOURCE_URL, userData: { label: LABELS.GOV } });
 
-    if (notificationEmail) {
+    if (notificationEmail && failedLimit < failedBefore) {
         await Apify.addWebhook({
             eventTypes: ['ACTOR.RUN.FAILED', 'ACTOR.RUN.TIMED_OUT'],
             requestUrl: `https://api.apify.com/v2/acts/mnmkng~email-notification-webhook/runs?token=${Apify.getEnv().token}`,
@@ -26,44 +27,42 @@ Apify.main(async () => {
     let totalInfected = 0;
     let tested = undefined;
     let totalDeceased = undefined;
+    let totalRecovered = undefined;
+    const proxyConfiguration = await Apify.createProxyConfiguration();
 
-    const crawler = new Apify.CheerioCrawler({
+    const crawler = new Apify.PuppeteerCrawler({
         requestQueue,
-        useApifyProxy: true,
         handlePageTimeoutSecs: 120,
-        handlePageFunction: async ({ $, request }) => {
+        proxyConfiguration,
+        gotoFunction: async ({ page, request }) => {
+            await page.on('response', async(interceptedRequest) => {
+                if (interceptedRequest.url().endsWith('.js') && interceptedRequest.url().includes('koroonakaart.ee/js/app')) {
+                    log.info(`Reading ${interceptedRequest.url()}`);
+                    try {
+                        let body = await interceptedRequest.text();
+                        log.info('Getting city and province data out of file');
+                        let start = body.indexOf('5033:function(t)');
+                        let end = body.indexOf(',"dates1":')
+                        body = body.substring(start, end);
+                        start = body.indexOf('{"')
+                        body = body.substring(start);
+                        body = `${body}}`;
+                        body = JSON.parse(body);
+                        totalInfected = body.confirmedCasesNumber;
+                        tested = body.testsAdministeredNumber;
+                        totalDeceased = body.deceasedNumber;
+                        totalRecovered = body.recoveredNumber;
+                    } catch (err) {
+                        log.error(err)
+                    }
+                }
+            });
+            return page.goto(request.url, { waitUntil: 'networkidle2', timeout: 300000 });
+        },
+        handlePageFunction: async ({ request }) => {
             const { label } = request.userData;
-            switch (label) {
-                case LABELS.GOV:
-                    const infoBoxes = $('.first').toArray();
-                    for (let box of infoBoxes) {
-                        const head = $(box).find('h2');
-                        if (head.text().trim() === 'CURRENT SITUATION IN ESTONIA') {
-                            const lastColumn = $(box).find('.last');
-                            tested = lastColumn.eq(0).text().trim();
-                            totalInfected = lastColumn.eq(1).text().trim();
-                            totalDeceased = lastColumn.eq(2).text().trim();
-                            tested = tested.replace(' ', '');
-                            totalInfected = totalInfected.replace(' ', '');
-                            totalDeceased = totalDeceased.replace('.', '');
-                        }
-                    }
-                    // await requestQueue.addRequest({ url: 'https://en.wikipedia.org/wiki/2020_coronavirus_pandemic_in_Estonia', userData: { label: LABELS.WIKI }});
-                    break;
-                case LABELS.WIKI:
-                    const tableRows = $('table.infobox tr').toArray();
-                    for (const row of tableRows) {
-                        const $row = $(row);
-                        const th = $row.find('th');
-                        if (th) {
-                            const value = $row.find('td');
-                            if (th.text().trim() === 'Deaths') {
-                                totalDeceased = value.text().trim();
-                            }
-                        }
-                    }
-                    break;
-            }
+            let response;
+            let body;
         },
         handleFailedRequestFunction: async ({ request }) => {
             console.log(`Request ${request.url} failed twice.`);
@@ -78,6 +77,7 @@ Apify.main(async () => {
         infected: parseInt(totalInfected, 10),
         tested: parseInt(tested, 10),
         deceased: parseInt(totalDeceased, 10),
+        recovered: parseInt(totalRecovered, 10),
         country: 'Estonia',
         moreData: 'https://api.apify.com/v2/key-value-stores/AZUhwS51lBBg26wSG/records/LATEST?disableRedirect=true',
         historyData: 'https://api.apify.com/v2/datasets/Ix8h3SN2Ngyukf7yM/items?format=json&clean=1',
@@ -92,6 +92,8 @@ Apify.main(async () => {
         delete latest.lastUpdatedAtApify;
     }
     if (latest && (latest.infected > data.infected)) {
+        failedBefore = failedBefore + 1;
+        await Apify.setValue('COVID-19-ESTONIA-FAILD', failedBefore);
         log.error('Latest data are high then actual - probably wrong scrap');
         console.log(latest);
         console.log(data);
@@ -106,6 +108,7 @@ Apify.main(async () => {
         await dataset.pushData(data);
     }
 
+    await Apify.setValue('COVID-19-ESTONIA-FAILD', 0);
     await kvStore.setValue(LATEST, data);
     log.info('Data stored, finished.');
 });

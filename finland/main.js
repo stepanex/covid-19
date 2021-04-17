@@ -1,14 +1,14 @@
 const Apify = require('apify');
-const moment = require('moment-timezone');
+// const moment = require('moment-timezone');
 const _ = require('lodash');
 
 const { log } = Apify.utils;
 log.setLevel(log.LEVELS.INFO);
 
-const LATEST ='LATEST';
+const LATEST = 'LATEST';
 
 Apify.main(async () => {
-    const sourceUrl = 'https://thl.fi/fi/web/infektiotaudit-ja-rokotukset/ajankohtaista/ajankohtaista-koronaviruksesta-covid-19/tilannekatsaus-koronaviruksesta';
+    const sourceUrl = 'https://thl.fi/en/web/infectious-diseases-and-vaccinations/what-s-new/coronavirus-covid-19-latest-updates/situation-update-on-coronavirus';
     const kvStore = await Apify.openKeyValueStore("COVID-19-FINLAND");
     const dataset = await Apify.openDataset("COVID-19-FINLAND-HISTORY");
 
@@ -24,59 +24,52 @@ Apify.main(async () => {
         maxRequestRetries: 1,
         handlePageTimeoutSecs: 60,
 
-        handlePageFunction: async ({ request, $ }) => {
+        handlePageFunction: async ({ request, $, body }) => {
+
             log.info(`Processing ${request.url}...`);
 
-            const data = {
-                sourceUrl,
-                lastUpdatedAtApify: moment().utc().second(0).millisecond(0).toISOString(),
-                readMe: "https://apify.com/dtrungtin/covid-fi",
-            };
+            const now = new Date();
 
             const confirmedDateText = $('#column-2-2 .journal-content-article > p:nth-child(2)').text();
             const matchUpadatedAt = confirmedDateText.match(/(\d+).(\d+). klo (\d+).(\d+)/);
 
-            if (matchUpadatedAt && matchUpadatedAt.length > 4) {
-                const currentYear = moment().tz('Europe/Helsinki').year();
-                const dateTimeStr = `${currentYear}.${matchUpadatedAt[2]}.${matchUpadatedAt[1]} ${matchUpadatedAt[3]}:${matchUpadatedAt[4]}`;
-                const dateTime = moment.tz(dateTimeStr, "YYYY.MM.DD H:mm", 'Europe/Helsinki');
-               
-                data.lastUpdatedAtSource = dateTime.toISOString();
-            } else {
-                throw new Error('lastUpdatedAtSource not found');
-            }
+            const infected = Number($('li:contains(Reported cases in total)').text().split('(')[0].replace(/\D/g,''));
+            const infectedDaily = Number($('li:contains(Reported cases in total)').text().split('(')[1].replace(/\D/g,''));
+            const tested = Number($('li:contains(Tested samples in total approx)').text().split('(')[0].replace(/\D/g,''))
+            const testedDaily = Number($('li:contains(Tested samples in total approx)').text().split('(')[1].replace(/\D/g,''));
+            const deaths = Number($('li:contains(Cumulative number of reported deaths associated with the disease:)').text().split('(')[0].replace(/\D/g,''));
+            const deathsDaily = Number($('li:contains(Cumulative number of reported deaths associated with the disease:)').text().split('(')[1].replace(/\D/g,''));
+            const ICU = Number($('li:contains(Number of patients in intensive care)').text().split('(')[0].replace(/\D/g,''));
+            const ICUDaily = Number($('li:contains(Number of patients in intensive care)').text().split('(')[1].replace(/\D/g,''));
+            const specializedHealthCare = Number($('li:contains(Number of patients in specialised medical care wards)').text().split('(')[0].replace(/\D/g,''));
+            const specializedHealthCareDaily = Number($('li:contains(Number of patients in specialised medical care wards)').text().split('(')[1].replace(/\D/g,''));
+            const primaryHealthCare = Number($('li:contains(Number of patients in primary)').text().split('(')[0].replace(/\D/g,''));
+            const primaryHealthCareDaily = Number($('li:contains(Number of patients in primary)').text().split('(')[1].replace(/\D/g,''));
+            
+            const data = {
+                infected,
+                infectedDaily,
+                tested,
+                testedDaily,
+                deaths,
+                deathsDaily,
+                ICU,
+                ICUDaily,
+                specializedHealthCare,
+                specializedHealthCareDaily,
+                primaryHealthCare,
+                primaryHealthCareDaily,
+                country: "Finland",
+                historyData: "https://api.apify.com/v2/datasets/BDEAOLx0DzEW91s5L/items?format=json&clean=1",
+                sourceUrl,
+                readMe: "https://apify.com/dtrungtin/covid-fi",
+                lastUpdatedAtApify: new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes())).toISOString()
+                // lastUpdatedAtApify: moment().utc().second(0).millisecond(0).toISOString(),
+            };
 
-            // const liList = $('.journal-content-article').eq(0).find('ul li');
-            // for (let index=0; index < liList.length; index++) {
-            //     const el = $(liList[index]);
-            //     if (el.text().includes('Finland')) {
-            //         const confirmedCasesText = el.next().find('li:first-child').text();
-            //         log.info(confirmedCasesText);
-            //         const parts = confirmedCasesText.match(/\s+(\d+)\s+/);
-            //         if (parts) {
-            //             data.confirmedCases = parseInt(parts[1]);
-            //             break;
-            //         }
-            //     }
-            // }
+            console.log(data);
+            
 
-            const testedText = $('.journal-content-article').eq(0).find('ul li').eq(0).text();
-            let parts = testedText.match(/\s+(\d+\s*\d+)\s+/);
-            if (parts) {
-                data.tested = parseInt(parts[1].replace(/\s/, ''));
-            }
-
-            const infectedText = $('.journal-content-article').eq(0).find('ul li').eq(1).text();
-            parts = infectedText.match(/\s+(\d+\s*\d+)\s+/);
-            if (parts) {
-                data.infected = parseInt(parts[1].replace(/\s/, ''));
-            }
-
-            const deathsText = $('.journal-content-article').eq(0).find('ul li').eq(3).text();
-            parts = deathsText.match(/\s+(\d+\s*\d+)[.\s]+/);
-            if (parts) {
-                data.deaths = parseInt(parts[1].replace(/\s/, ''));
-            }
 
             // Compare and save to history
             const latest = await kvStore.getValue(LATEST) || {};

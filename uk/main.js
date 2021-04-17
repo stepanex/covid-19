@@ -1,8 +1,6 @@
 const Apify = require('apify');
 
-const sourceUrl = 'https://coronavirus.data.gov.uk/';
 const LATEST = 'LATEST';
-let check = false;
 
 Apify.main(async () =>
 {
@@ -23,72 +21,120 @@ Apify.main(async () =>
     await page.goto('https://coronavirus.data.gov.uk/', { waitUntil: 'networkidle0' });
     await Apify.utils.puppeteer.injectJQuery(page);
     
-    //const trackCoronavirusCases = '#attachment_4091163 > div.attachment-details > h2 > a';
-    //const trackCoronavirusCases = '#attachment_4077017 > div.attachment-details > h2 > a';
-    //await page.waitForSelector(trackCoronavirusCases);
-
-    // const trackCoronavirusCasesLink = await page.$eval(trackCoronavirusCases, el => el.href);
-    // networkidle0 : wait for all page to load
-    //await page.goto(trackCoronavirusCasesLink, { timeout: 60000 });
-   
-    //await page.waitForSelector('#UK_Countries_cases_976_layer', { timeout: 60000 });
-    //await page.waitForSelector('div.flex-fluid');
     await page.waitFor(4000);
-    //await page.waitForSelector("text[vector-effect='non-scaling-stroke']");
- 
+    
     console.log('Getting data...');
     // page.evaluate(pageFunction[, ...args]), pageFunction <function|string> Function to be evaluated in the page context, returns: <Promise<Serializable>> Promise which resolves to the return value of pageFunction
     const result = await page.evaluate(() =>
     {
 
         const getInt = (x)=>{
-            return parseInt(x.replace(' ','').replace(',','').replace(String.fromCharCode(160),''))};
-            
-        const now = new Date();
-        
-        // eq() selector selects an element with a specific index number, text() method sets or returns the text content of the selected elements
-        const totalInfected = $('h2:contains("Total number of lab-confirmed UK cases")').next().text().trim();
-        const dailyConfirmed = $('h2:contains("Daily number of lab-confirmed UK cases")').next().text().trim();
-        //const patientsRecovered = $("text[vector-effect='non-scaling-stroke']").eq(4).text();
-        const deceased = $('h2:contains("Total number of COVID-19 associated UK deaths")').next().text().trim();
-        const englandConfirmed = $('td:contains("England")').next().eq(0).text().trim();
-        const englandDeceased = $('h3:contains("England").govuk-caption-m').next().text().trim();
-        const scotlandConfirmed = $('td:contains("Scotland")').next().eq(0).text().trim();
-        const scotlandDeceased = $('h3:contains("Scotland").govuk-caption-m').next().text().trim();
-        const walesConfirmed =$('td:contains("Wales")').next().eq(0).text().trim();
-        const walesDeceased = $('h3:contains("Wales").govuk-caption-m').next().text().trim();
-        const irelandConfirmed = $('td:contains("Northern Ireland")').next().eq(0).text().trim();
-        const irelandDeceased = $('h3:contains("Northern Ireland").govuk-caption-m').next().text().trim();
-                     
-        
+            return parseInt(x.replace(' ','').replace(/,/g,''))};
+                  
+        const dailyConfirmed = $( "span:contains(' Daily number of people tested positive')").parent().text();
+        const dailyTested = $( "span:contains('Daily number of virus tests ')").parent().text();
+        const dailyDeceasedWithin28Days = $( "span:contains('Daily number of deaths within 28 days ')").parent().text();
+       
         const data = {
-            infected: getInt(totalInfected),
-            tested: "N/A",
-            recovered: "N/A",
-            deceased: getInt(deceased),
+            dailytested: getInt(dailyTested),
+            dailyDeceasedWithin28Days: getInt(dailyDeceasedWithin28Days),
             dailyConfirmed: getInt(dailyConfirmed),
-            englandConfirmed: getInt(englandConfirmed),
-            englandDeceased: getInt(englandDeceased),
-            scotlandConfirmed: getInt(scotlandConfirmed),
-            scotlandDeceased: getInt(scotlandDeceased),
-            walesConfirmed: getInt(walesConfirmed),
-            walesDeceased: getInt(walesDeceased),
-            northenIrelandConfirmed: getInt(irelandConfirmed),
-            northenIrelandDeceased: getInt(irelandDeceased),
-            country: "UK",
-            historyData: "https://api.apify.com/v2/datasets/K1mXdufnpvr53AFk6/items?format=json&clean=1",
-            sourceUrl:'https://www.gov.uk/government/publications/covid-19-track-coronavirus-cases',
-            lastUpdatedAtApify: new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes())).toISOString(),
-            lastUpdatedAtSource: "N/A",
-            readMe: 'https://apify.com/katerinahronik/covid-uk',
             };
         return data;
         
     });       
     
+
+    // getting data about total infected
+    await page.goto('https://coronavirus.data.gov.uk/details/cases', { waitUntil: 'networkidle0' });
+    await Apify.utils.puppeteer.injectJQuery(page);
+    
+    await page.waitFor(8000);
+
+    const resultInfected = await page.evaluate(() =>
+        {
+
+            const getInt = (x)=>{
+                return parseInt(x.replace(' ','').replace(/,/g,''))};
+                    
+            const totalInfected = $( "a[id*='people_tested_positive-total']").text()
+                                
+            const data = {
+                infected: getInt(totalInfected),
+                
+                };
+            return data;
+            
+        });     
+
+
+    result.infected = resultInfected.infected
+
+     // getting data about total tested
+     await page.goto('https://coronavirus.data.gov.uk/details/testing', { waitUntil: 'networkidle0' });
+     await Apify.utils.puppeteer.injectJQuery(page);
+     
+     await page.waitFor(8000);
+ 
+     const resultTotalTested = await page.evaluate(() =>
+         {
+ 
+             const getInt = (x)=>{
+                 return parseInt(x.replace(' ','').replace(/,/g,''))};
+                     
+             const tested =  $( "a[id*='value-item-virus_tests_conducted-total']").text()
+                                 
+             const data = {
+                tested: getInt(tested),
+                 
+                 };
+             return data;
+             
+         });     
+ 
+ 
+     result.tested = resultTotalTested.tested
+
+    // getting data about total deceased
+    await page.goto('https://coronavirus.data.gov.uk/details/deaths', { waitUntil: 'networkidle0' });
+    await Apify.utils.puppeteer.injectJQuery(page);
+    
+    await page.waitFor(8000);
+
+    const resultDeceased = await page.evaluate(() =>
+        {
+
+            const getInt = (x)=>{
+                return parseInt(x.replace(' ','').replace(/,/g,''))};
+            const now = new Date();        
+            
+            const deceased = $( "a[id*='deaths_with_covid-19_on_the_death_certificate-total']").text()
+                                
+            const data = {
+                deceased: getInt(deceased),
+                country: "UK",
+                historyData: "https://api.apify.com/v2/datasets/K1mXdufnpvr53AFk6/items?format=json&clean=1",
+                sourceUrl:'https://coronavirus.data.gov.uk/',
+                lastUpdatedAtApify: new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes())).toISOString(),
+                lastUpdatedAtSource: $("#last-update time").attr("datetime"),
+                readMe: 'https://apify.com/katerinahronik/covid-uk',
+                
+                };
+            return data;
+            
+        });  
+
+    result.deceased = resultDeceased.deceased;
+    result.country = resultDeceased.country;
+    result.historyData = resultDeceased.historyData;
+    result.sourceUrl = resultDeceased.sourceUrl;
+    result.lastUpdatedAtApify = resultDeceased.lastUpdatedAtApify;
+    result.lastUpdatedAtSource = resultDeceased.lastUpdatedAtSource;
+    result.readMe = resultDeceased.readMe
+
     console.log(result)
     
-    if ( !result.infected || !result.dailyConfirmed || !result.deceased || !result.englandConfirmed || !result.scotlandConfirmed|| !result.walesConfirmed|| !result.northenIrelandConfirmed ) {
+    if ( !result.infected || !result.dailyConfirmed || !result.tested) {
                 throw "One of the output is null";
             }
     else {
@@ -114,21 +160,6 @@ Apify.main(async () =>
     await browser.close();
     console.log('Done.');  
     
-    // if there are no data for TotalInfected, send email, because that means something is wrong
-    // const env = await Apify.getEnv();
-    // if (check) {
-    //     await Apify.call(
-    //         'apify/send-mail',
-    //         {
-    //             to: email,
-    //             subject: `Covid-19 UK from ${env.startedAt} failed `,
-    //             html: `Hi, ${'<br/>'}
-    //                     <a href="https://my.apify.com/actors/${env.actorId}#/runs/${env.actorRunId}">this</a> 
-    //                     run had 0 TotalInfected, check it out.`,
-    //         },
-    //         { waitSecs: 0 },
-    //     );
-    // };
 }
 catch(err){
 

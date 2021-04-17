@@ -1,70 +1,126 @@
+// main.js
 const Apify = require('apify');
-
+const XLSX = require("xlsx");
 const { log } = Apify.utils;
-const sourceUrl = 'https://gouvernement.lu/fr/dossiers.gouv_msan+fr+dossiers+2020+corona-virus.html#bloub-0';
+
 const LATEST = 'LATEST';
 
+const sourceUrl = 'https://data.public.lu/fr/datasets/donnees-covid19/';
+const now = new Date();
+
 Apify.main(async () => {
-    const requestQueue = await Apify.openRequestQueue();
+
+    log.info('Starting actor.');
     const kvStore = await Apify.openKeyValueStore('COVID-19-LUXEMBOURG');
     const dataset = await Apify.openDataset('COVID-19-LUXEMBOURG-HISTORY');
 
-    await requestQueue.addRequest({ url: sourceUrl });
-    const crawler = new Apify.CheerioCrawler({
+    const requestQueue = await Apify.openRequestQueue();
+    await requestQueue.addRequest({
+        url: 'https://data.public.lu/fr/datasets/donnees-covid19/',
+        userData: {
+            label: 'GET_XLSX_LINK'
+        }
+    })
+
+    const cheerioCrawler = new Apify.CheerioCrawler({
         requestQueue,
-        handlePageTimeoutSecs: 60 * 2,
-        handlePageFunction: async ({ $ }) => {
-            log.info('Page loaded.');
-            const now = new Date();
-
-            const mainSection = $('.page-text section').eq(1);
-            const accordion = mainSection.find('.accordion > details')
-
-            const infectedRow = accordion.eq(0);
-            const infected = infectedRow.find('summary > span:first-child').text().trim().replace('.','');
-            const testedRow = accordion.eq(1);
-            const tested = testedRow.find('summary > span:first-child').text().trim().replace('.','');
-            const deceasedRow = accordion.eq(2);
-            const deceased = deceasedRow.find('summary > span:first-child').text().trim().replace('.','');
-
-            const [day,month,year] =$('.page-text .box-content .date').text().replace(/\(|\)/g,'').split('.');
-            let lastUpdatedParsed = new Date(`${month}.${day}.${year}`);
-
-            const data = {
-                infected: parseInt(infected),
-                deceased: parseInt(deceased),
-                tested: parseInt(tested),
-                sourceUrl,
-                lastUpdatedAtSource: lastUpdatedParsed.toISOString(),
-                lastUpdatedAtApify: new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes())).toISOString(),
-                readMe: 'https://apify.com/tugkan/covid-lu',
-            };
-
-            // Compare and save to history
-            const latest = await kvStore.getValue(LATEST) || {};
-            delete latest.lastUpdatedAtApify;
-            const actual = Object.assign({}, data);
-            delete actual.lastUpdatedAtApify;
-
-            await Apify.pushData({...data});
-
-            if (JSON.stringify(latest) !== JSON.stringify(actual)) {
-                log.info('Data did change :( storing new to dataset.');
-                await dataset.pushData(data);
+        requestTimeoutSecs: 90,
+        useApifyProxy: true,
+        handleRequestTimeoutSecs: 120,
+        additionalMimeTypes: [
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "text/csv"
+            // "text/plain",
+        ],
+        prepareRequestFunction: async ({ request }) => {
+            if (request.url.endsWith(".xlsx")) {
+                log.info(`Proccecing ${request.url}`);
+                log.info(`Downloading xlsx file ...`);
             }
-
-            await kvStore.setValue(LATEST, data);
-            log.info('Data stored, finished.');
         },
+        handlePageFunction: async ({ request, $, body }) => {
+            const { label } = request.userData;
+            switch (label) {
+                case "GET_XLSX_LINK":
+                    log.info(`Proccecing ${request.url}`);
+                    log.info(`Getting xlsx download link.`);
+                    const { contentUrl, dateModified: fileDateModified } = JSON.parse($('script#json_ld').html().replace(/\\|/g, '')).distribution[0];
 
-        // This function is called if the page processing failed more than maxRequestRetries+1 times.
+                    await requestQueue.addRequest({
+                        url: contentUrl,
+                        userData: {
+                            label: 'EXTRACT_DATA',
+                            dateModified: fileDateModified,
+                        }
+                    })
+                    break;
+                case "EXTRACT_DATA":
+                    log.info(`File had downloaded.`);
+                    log.info(`Processing and saving data.`);
+                    let workbook = XLSX.read(body, { type: "buffer" });
+
+                    const total = XLSX.utils.sheet_to_json(workbook.Sheets["Sheet1"]);
+
+                    // Extract date
+                    const srcDate = new Date(request.userData.dateModified);
+                    const lastItem = total.pop();
+                    const data = {
+                        tested: Number(lastItem["Nb de tests effectués cumulés"]
+                            || lastItem["Nb de tests effectués sur résidents cumulés"]),
+                        infected: Number(lastItem["Nb de positifs cumulé"]
+                            || lastItem["Nb de résidents positifs cumulé"]),
+                        deceased: Number(lastItem["[1.NbMorts]"]),
+                        intensiveCare: Number(lastItem["Soins intensifs"]
+                            || lastItem["Soins intensifs (sans GE)"]),
+                        normalCare: Number(lastItem["Soins normaux"]),
+                        newlyTested: Number(lastItem["Nb de tests effectués"]
+                            || lastItem["Nb de tests effectués sur résidents"]),
+                        newlyInfected: Number(lastItem["Nb de positifs"]
+                            || lastItem["Nb de résidents positifs"]),
+                        newlyRecovered: lastItem["[9.TotalPatientDepartHopital]"],
+                        sourceUrl,
+                        country: 'Luxembourg',
+                        historyData: 'https://api.apify.com/v2/datasets/oZH6thpQSdIyo3ky2/items?format=json&clean=1',
+                        lastUpdatedAtSource: new Date(Date.UTC(srcDate.getFullYear(), srcDate.getMonth(), srcDate.getDate(), srcDate.getHours(), srcDate.getMinutes())).toISOString(),
+                        lastUpdatedAtApify: new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes())).toISOString(),
+                        readMe: 'https://apify.com/tugkan/covid-lu',
+                    }
+                    console.log(data)
+
+                    // Push the data
+                    let latest = await kvStore.getValue(LATEST);
+                    if (!latest) {
+                        await kvStore.setValue("LATEST", data);
+                        latest = Object.assign({}, data);
+                    }
+                    delete latest.lastUpdatedAtApify;
+                    const actual = Object.assign({}, data);
+                    delete actual.lastUpdatedAtApify;
+
+                    const { itemCount } = await dataset.getInfo();
+                    if (
+                        JSON.stringify(latest) !== JSON.stringify(actual) ||
+                        itemCount === 0
+                    ) {
+                        await dataset.pushData(data);
+                    }
+
+                    await kvStore.setValue("LATEST", data);
+                    await Apify.pushData(data);
+
+                    log.info("Data saved.");
+                    break;
+                default:
+                    break;
+            }
+        },
         handleFailedRequestFunction: async ({ request }) => {
-            console.log(`Request ${request.url} failed twice.`);
+            console.log(`Request ${request.url} failed many times.`);
+            console.dir(request);
         },
     });
-
     // Run the crawler and wait for it to finish.
-    await crawler.run();
-
-    console.log('Crawler finished.');
+    log.info("Starting the crawl.");
+    await cheerioCrawler.run();
+    log.info("Actor finished.");
 });

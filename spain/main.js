@@ -1,206 +1,137 @@
+// main.js
 const Apify = require('apify');
-const httpRequest = require('@apify/http-request')
-const cheerio = require('cheerio');
-const sourceUrl = 'https://covid19.isciii.es/';
+const cheerio = require('cheerio')
+const { log, requestAsBrowser } = Apify.utils;
 const LATEST = 'LATEST';
 
+const sourceUrl = 'https://www.mscbs.gob.es/profesionales/saludPublica/ccayes/alertasActual/nCov-China/situacionActual.htm';
+const now = new Date();
+const toNumber = (txt) => parseInt(txt.replace(/\D/g, ''), 10);
+
 Apify.main(async () => {
+
+    Apify.client.setOptions({ token: process.env.APIFY_TOKEN });
+
+    log.info('Starting actor.');
+
     const kvStore = await Apify.openKeyValueStore('COVID-19-ES');
     const dataset = await Apify.openDataset('COVID-19-ES-HISTORY');
 
-    console.log('Getting data...');
-    const { body } = await httpRequest({ url: sourceUrl });
-    const $ = cheerio.load(body);
-    const infected = $('#casos-pcr').text()
-    const deceased = $('#fallecidos').text();
-    // const recovered = $("#recuperados").text();
-    const hospitalised = $("#hospitalizados").text();
-    const ICU = $("#uci").text();
-    const updated = $('#fecha-de-actualización').text()
+    const requestQueue = await Apify.openRequestQueue();
+    await requestQueue.addRequest({
+        url: sourceUrl,
+        userData: {
+            label: 'GET_PDF_LINK'
+        }
+    })
+    const crawler = new Apify.BasicCrawler({
+        requestQueue,
+        handleRequestTimeoutSecs: 240,
+        handleRequestFunction: async ({ request }) => {
+            const { url, userData: { label } } = request;
+            log.info('Page opened.', { label, url });
 
-    // const regionsString = $('script:contains(Mancha)').text().match(/\[[^\[]*La Mancha.*?\]/)[0];
-    // const regionsArrays = regionsString.match(/<strong>.*?(<br\/>|\d")/g)
-    // const regionData = {}
-    // for (let i = 0; i < regionsArrays.length; i += 4) {
-    //     region = {};
-    //     let regionName = regionsArrays[i].replace(/<.*?strong>/g, "").replace(/<br\/>/, "");
-    //     region.total = getInt(regionsArrays[i + 1].replace(/<strong>.*?<\\\/strong>/g, "").replace(/<br\/>/, ""));
-    //     region.lastDay = getInt(regionsArrays[i + 2].replace(/<strong>.*?<\\\/strong>/g, "").replace(/<br\/>/, ""));
-    //     region.IA14d = getFloat(regionsArrays[i + 3].replace(/<strong>.*?<\\\/strong>/g, "").replace(/"/, ""));
-    //     regionData[regionName] = region;
-    // }
+            switch (label) {
+                case 'GET_PDF_LINK':
 
-    const now = new Date();
+                    const { body } = await requestAsBrowser({ url });
+                    const $ = cheerio.load(body)
 
-    //takes only digits from a string and also converts them to number
-    const onlyDigits = (string) => Number(string.replace(/\D/g, ''));
+                    const pdfLink = $('div.imagen_texto ul li:nth-child(2) a').attr('href');
+                    //.match(/profesionales.*/g)[0]; //stolen from the previous link, didnt work with it anymore
 
+                    await requestQueue.addRequest({
+                        url: `https://www.mscbs.gob.es/profesionales/saludPublica/ccayes/alertasActual/nCov/${pdfLink}`,
+                        userData: {
+                            label: 'EXTRACT_DATA'
+                        }
+                    })
+                    break;
+                case 'EXTRACT_DATA': {
+                    log.info('Converting pdf to html...')
 
-    const result = {
-        infected: onlyDigits(infected),
-        // recovered: toInt(recovered),
-        deceased: onlyDigits(deceased),
-        hospitalised: onlyDigits(hospitalised),
-        ICU: onlyDigits(ICU),
-        // regionData: regionData,
-        sourceUrl: 'https://covid19.isciii.es/',
-        lastUpdatedAtApify: new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes())).toISOString(),
-        // lastUpdatedAtSource: updated.trim(),
-        readMe: 'https://apify.com/zuzka/covid-es'
-    };
-    console.log(result)
+                    const run = await Apify.call('jancurn/pdf-to-html', {
+                        url,
+                    });
+                    log.info('Proccesing and saving data...')
+                    const $ = cheerio.load(run.output.body)
 
-    // const dateSpanish = result.lastUpdatedAtSource;
-    // const dateWithoutDe = dateSpanish.replace('de', '');
-    // var utcDate = moment(dateWithoutDe, 'DD MMM MMMM H:mm', 'es').locale('en').toISOString();
-    // result.lastUpdatedAtSource = utcDate
+                    let totalColumn = $('div:contains(La Rioja)').eq(3).nextAll().toArray();
+                    let hospColumn = $('div:contains(La Rioja)').eq(7).nextAll().toArray();
+                    let deathsColumn = $(`div:contains(La Rioja)`).eq(17).nextAll().toArray();
 
-    let latest = await kvStore.getValue(LATEST);
-    if (!latest) {
-        await kvStore.setValue('LATEST', result);
-        latest = result;
-    }
-    delete latest.lastUpdatedAtApify;
-    const actual = Object.assign({}, result);
-    delete actual.lastUpdatedAtApify;
+                    let regionsNames = ['Andalucía', 'Aragón', 'Asturias', "Baleares", "Canarias", "Cantabria", "Castilla La Mancha", "Castilla y León",
+                        "Cataluña", "Ceuta", "C. Valenciana", "Extremadura", "Galicia", "Madrid", "Melilla", "Murcia", "Navarra", "País Vasco ", "La Rioja"]
+                    let regions = []
 
-    if (JSON.stringify(latest) !== JSON.stringify(actual)) {
-        await dataset.pushData(result);
-    }
+                    regionsNames.forEach(name => {
 
-    await kvStore.setValue('LATEST', result);
-    await Apify.pushData(result);
-}
-);
+                        let firstElem = $(`div:contains(${name})`).eq(3).nextAll().toArray();
+                        let secondElem = $(`div:contains(${name})`).eq(7).nextAll().toArray();
+                        let thirdElem = $(`div:contains(${name})`).eq(17).nextAll().toArray();
 
+                        regions.push({
+                            name,
+                            infected: toNumber($(firstElem[0]).text().trim()),
+                            deceased: toNumber($(thirdElem[0]).text()),
+                            hospitalised: toNumber($(secondElem[0]).text()),
+                            ICU: toNumber($(secondElem[2]).text()),
+                            dailyInfected: toNumber($(firstElem[1]).text().trim()),
+                        })
+                    })
 
+                    const $srcDate = $('span:contains(datos consolidados a las)').eq(0).text().match(/\(.*\)/g)[0];
+                    const [h, rest] = $srcDate.match(/(?<=a las.*)[^\)]+(?=\))/g)[0].trim().replace(/[^:\d. ]/g, '')
+                        .replace(/  +/g, ' ').split(' ');
+                    const [d, m, y] = rest.split('.');
 
+                    const srcDate = new Date(`${h} ${m}-${d}-${y}`);
 
-// old code from here down!!
+                    const data = {
+                        infected: toNumber($(totalColumn[11]).text()),
+                        recovered: 'N/A',
+                        tested: 'N/A',
+                        deceased: toNumber($(deathsColumn[3]).text()),
+                        hospitalised: toNumber($(hospColumn[13]).text()),
+                        ICU: toNumber($(hospColumn[15]).text()),
+                        newlyDeceased: toNumber($(deathsColumn[4]).text()),
+                        newlyHospitalised: toNumber($(hospColumn[14]).text()),
+                        NewlyInICU: toNumber($(hospColumn[16]).text()),
+                        dailyInfected: toNumber($(totalColumn[12]).text()),
+                        regions,
+                        country: 'Spain',
+                        historyData: 'https://api.apify.com/v2/datasets/hxwow9BB75z8RV3JT/items?format=json&clean=1',
+                        sourceUrl: sourceUrl,
+                        lastUpdatedAtApify: new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes())).toISOString(),
+                        lastUpdatedAtSource: new Date(Date.UTC(srcDate.getFullYear(), srcDate.getMonth(), srcDate.getDate(), (srcDate.getHours()), srcDate.getMinutes())).toISOString(),
+                        readMe: 'https://apify.com/zuzka/covid-es',
+                    }
+                    // Push the data
+                    let latest = await kvStore.getValue(LATEST);
+                    if (!latest) {
+                        await kvStore.setValue('LATEST', data);
+                        latest = Object.assign({}, data);
+                    }
+                    delete latest.lastUpdatedAtApify;
+                    const actual = Object.assign({}, data);
+                    delete actual.lastUpdatedAtApify;
 
+                    const { itemCount } = await dataset.getInfo();
+                    if (JSON.stringify(latest) !== JSON.stringify(actual) || itemCount === 0) {
+                        await dataset.pushData(data);
+                    }
 
-// const Apify = require('apify');
-// const moment = require('moment');
+                    await kvStore.setValue('LATEST', data);
+                    await Apify.pushData(data);
 
-// const sourceUrl = 'https://covid19.isciii.es/';
-// const LATEST = 'LATEST';
-// let check = false;
+                    log.info('Data saved.');
+                }
+                    break;
+            }
+        },
+    });
 
-// Apify.main(async () => {
-
-//     const kvStore = await Apify.openKeyValueStore('COVID-19-ES');
-//     const dataset = await Apify.openDataset('COVID-19-ES-HISTORY');
-
-
-//     console.log('Launching Puppeteer...');
-//     const browser = await Apify.launchPuppeteer();
-
-//     const page = await browser.newPage();
-//     await Apify.utils.puppeteer.injectJQuery(page);
-
-//     console.log('Going to the website...');
-//     await page.goto(sourceUrl, { waitUntil: 'networkidle0', timeout: 60000 });
-
-//     console.log('Getting data...');
-//     // page.evaluate(pageFunction[, ...args]), pageFunction <function|string> Function to be evaluated in the page context, returns: <Promise<Serializable>> Promise which resolves to the return value of pageFunction
-//     const result = await page.evaluate(() => {
-//         const now = new Date();
-
-//         // eq() selector selects an element with a specific index number, text() method sets or returns the text content of the selected elements
-//         const infected = $('#casos-pcr > div.inner > p.value').text();
-//         const deceased = $('#fallecidos > div.inner > p.value').text();
-//         // const recovered = $("#recuperados > div.inner > p.value").text();
-//         const hospitalised = $("#hospitalizados > div.inner > p.value").text();
-//         const ICU = $("#uci > div.inner > p.value").text();
-//         const updated = $('#fecha-de-actualización > div.inner > p.value').text()
-
-//         const getInt = (string) => (Number(string.replace('.', '')));
-//         const getFloat = (string) => (Number(string.replace(',', '.')));
-        
-//         // const regionsTableRows = Array.from(document.querySelectorAll("table tbody tr"));
-//         // const regionData = [];
-
-//         // for(const row of regionsTableRows){
-//         //     const cells = Array.from(row.querySelectorAll("td")).map(td=> td.textContent);
-//         //     regionData.push({region: cells[0], total: cells[1], lastDay: cells[2], inc14d: cells[3]});
-//         // }
-
-//         const regionsString = $('script:contains(Mancha)').text().match(/\[[^\[]*La Mancha.*?\]/)[0];
-//         const regionsArrays = regionsString.match(/<strong>.*?(<br\/>|\d")/g)
-//         const regionData = {}
-//         for (let i = 0; i < regionsArrays.length; i += 4)
-//         {
-//             region = {};
-//             let regionName = regionsArrays[i].replace(/<.*?strong>/g, "").replace(/<br\/>/, "");
-//             region.total = getInt(regionsArrays[i + 1].replace(/<strong>.*?<\\\/strong>/g, "").replace(/<br\/>/, ""));
-//             region.lastDay = getInt(regionsArrays[i + 2].replace(/<strong>.*?<\\\/strong>/g, "").replace(/<br\/>/, ""));
-//             region.IA14d = getFloat(regionsArrays[i + 3].replace(/<strong>.*?<\\\/strong>/g, "").replace(/"/, ""));
-//             regionData[regionName] = region;
-//         }
-
-//         const data = {
-//             infected: getInt(infected),
-//             deceased: getInt(deceased),
-//             recovered: getInt(recovered),
-//             hospitalised: getInt(hospitalised),
-//             ICU: getInt(ICU),
-//             regionData: regionData,
-//             sourceUrl: 'https://covid19.isciii.es/',
-//             lastUpdatedAtApify: new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes())).toISOString(),
-//             lastUpdatedAtSource: updated,
-//             readMe: 'https://github.com/zpelechova/covid-es/blob/master/README.md',
-//             // regions: regionData,
-//         };
-//         return data;
-
-//     });
-    
-//     const dateSpanish = result.lastUpdatedAtSource;
-//     const dateWithoutDe = dateSpanish.replace('de', '');
-//     var utcDate = moment(dateWithoutDe, 'DD MMM MMMM H:mm', 'es').locale('en').toISOString();
-//     result.lastUpdatedAtSource = utcDate
-
-//     console.log(result)
-
-//     // if (!result.infected || !result.deceased || !result.recovered) {
-//     //     check = true;
-//     // }
-//     // else {
-//     //     let latest = await kvStore.getValue(LATEST);
-//     //     if (!latest) {
-//     //         await kvStore.setValue('LATEST', result);
-//     //         latest = result;
-//     //     }
-//     //     delete latest.lastUpdatedAtApify;
-//     //     const actual = Object.assign({}, result);
-//     //     delete actual.lastUpdatedAtApify;
-
-//     //     if (JSON.stringify(latest) !== JSON.stringify(actual)) {
-//     //         await dataset.pushData(result);
-//     //     }
-
-//     //     await kvStore.setValue('LATEST', result);
-//     //     await Apify.pushData(result);
-//     // }
-
-
-//     // console.log('Closing Puppeteer...');
-//     // await browser.close();
-//     // console.log('Done.');
-
-//     // // if there are no data for TotalInfected, send email, because that means something is wrong
-//     // const env = await Apify.getEnv();
-//     // if (check) {
-//     //     await Apify.call(
-//     //         'apify/send-mail',
-//     //         {
-//     //             to: email,
-//     //             subject: `Covid-19 ES from ${env.startedAt} failed `,
-//     //             html: `Hi, ${'<br/>'}
-//     //                     <a href="https://my.apify.com/actors/${env.actorId}#/runs/${env.actorRunId}">this</a> 
-//     //                     run had 0 TotalInfected, check it out.`,
-//     //         },
-//     //         { waitSecs: 0 },
-//     //     );
-//     // };
-// });
+    // Run the crawler and wait for it to finish.
+    await crawler.run();
+    console.log('Crawler finished.');
+});

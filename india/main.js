@@ -7,7 +7,6 @@ Apify.main(async () => {
 
     const kvStore = await Apify.openKeyValueStore('COVID-19-IN');
     const dataset = await Apify.openDataset('COVID-19-IN-HISTORY');
-    const { email } = await Apify.getValue('INPUT');
 
     console.log('Launching Puppeteer...');
     const browser = await Apify.launchPuppeteer();
@@ -23,28 +22,51 @@ Apify.main(async () => {
     const result = await page.evaluate(() => {
         const now = new Date();
 
-        const activeCases = Number($('#site-dashboard > div > div > div > div > ul > li.bg-blue > strong').text());
-        const recovered = Number($("#site-dashboard > div > div > div > div > ul > li.bg-green > strong").text());
-        const deaths = Number($('#site-dashboard > div > div > div > div > ul > li.bg-red > strong').text());
+        const activeCases = Number($('strong:contains(Active)').next().text().split("(")[0]);
+        const activeCasesNew = Number($('strong:contains(Active)').next().text().split("(")[1].replace(/\D/g, ''));
+        const recovered = Number($('strong:contains(Discharged)').next().text().split("(")[0]);
+        const recoveredNew = Number($('strong:contains(Discharged)').next().text().split("(")[1].replace(/\D/g, ''));
+        const deaths = Number($('strong:contains(Deaths)').next().text().split("(")[0]);
+        const deathsNew = Number($('strong:contains(Deaths)').next().text().split("(")[1].replace(/\D/g, ''));
+        const previousDayTests = Number($('.header-section > div > div > div > div > div > marquee > span').text().split(" ")[9].split(",").join(""));
 
         const rawTableRows = [...document.querySelectorAll("#state-data > div > div > div > div > table > tbody > tr")];
-        const regionsTableRows = rawTableRows.filter(row => row.querySelectorAll('td').length === 5);
+        const regionsTableRows = rawTableRows.filter(row => row.querySelectorAll('td').length === 8);
         const regionData = [];
 
         for (const row of regionsTableRows) {
-            const cells = Array.from(row.querySelectorAll("td")).map(td => td.textContent);
-            regionData.push({ region: cells[1], totalInfected: Number(cells[2]), recovered: Number(cells[3]), deceased: Number(cells[4]) });
+            const cells = Array.from(row.querySelectorAll("td")).map(td => getFormattedNumber(td));
+            if (cells[1] !== 'Total#') regionData.push({
+                region: cells[1],
+                totalInfected: Number(cells[2]),
+                newInfected: Number(cells[3]),
+                recovered: Number(cells[4]),
+                newRecovered: Number(cells[5]),
+                deceased: Number(cells[6]),
+                newDeceased: Number(cells[7])
+            });
+        }
+
+        function getFormattedNumber(td) {
+            const tdText = $(td).text().trim();
+            if ($(td).find('.fa-arrow-up').length) return Number(`+${tdText}`);
+            if ($(td).find('.fa-arrow-down').length) return Number(`-${tdText}`);
+            return isNaN(tdText) ? tdText : Number(tdText);
         }
 
         const data = {
-            activeCases: activeCases,
-            recovered: recovered,
-            deaths: deaths,
-            totalCases: parseInt(activeCases) + parseInt(recovered) + parseInt(deaths),
+            activeCases,
+            activeCasesNew,
+            recovered,
+            recoveredNew,
+            deaths,
+            deathsNew,
+            previousDayTests,
+            totalCases: activeCases + recovered + deaths,
             sourceUrl: 'https://www.mohfw.gov.in/',
             lastUpdatedAtApify: new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes())).toISOString(),
             readMe: 'https://github.com/zpelechova/covid-in/blob/master/README.md',
-            regionData: regionData
+            regionData: regionData,
         };
         return data;
 
